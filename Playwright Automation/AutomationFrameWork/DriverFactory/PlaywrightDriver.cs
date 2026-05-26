@@ -42,16 +42,40 @@ namespace AutomationFrameWork.Drivers
             var launchOptions = new BrowserTypeLaunchOptions
             {
                 Headless = config.AutomationSettings.Headless,
-                Args = new[] { "--start-maximized" }
+                SlowMo = config.AutomationSettings.SlowMo,
+                //Args = new[] { "--start-maximized" }
+                Args = new[]
+                {
+                    /*
+                     * Un-comment and use the below option in case of headless mode run
+                     * as the deault resolution of the browser opened by playwright will be smaller 
+                     * but this works in BOTH headed & headless  
+                     *
+                     */
+
+                    // $"--window-size={config.AutomationSettings.targetWidth},{config.AutomationSettings.targetHeight}",  
+
+                    /* 
+                     * Un-comment and use the below option in case if you wnat to run the code in haded mode 
+                     * and want to launch the browser for default maximized resolution.
+                     */ 
+                    
+                    
+                     "--start-maximized"
+
+
+                }
             };
 
             string browserName = config.AutomationSettings.Browser?.ToLower();
 
+            // -------- Browser Validation & Launch --------
             if (!string.IsNullOrWhiteSpace(browserName))
             {
                 switch (browserName)
                 {
                     case "chrome":
+                        //launchOptions.Channel = "chrome";
                         launchOptions.ExecutablePath = @"C:\Program Files\Google\Chrome\Application\chrome.exe";
                         Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
                         break;
@@ -62,20 +86,28 @@ namespace AutomationFrameWork.Drivers
                     case "chromium":
                         Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
                         break;
+
                     case "firefox":
                         Browser = await Playwright.Firefox.LaunchAsync(launchOptions);
                         break;
+
                     case "webkit":
                         Browser = await Playwright.Webkit.LaunchAsync(launchOptions);
                         break;
+
                     default:
                         throw new ArgumentException($"Unsupported browser: {config.AutomationSettings.Browser}");
                 }
+
+
             }
 
             var contextOptions = new BrowserNewContextOptions
             {
                 ViewportSize = ViewportSize.NoViewport,
+
+                //Time Zone
+                TimezoneId = "Asia/Kolkata"
             };
 
             if (sessionExists)
@@ -100,6 +132,7 @@ namespace AutomationFrameWork.Drivers
             {
                 var tempPage = await BrowserContext.NewPageAsync();
                 var session = await BrowserContext.NewCDPSessionAsync(tempPage);
+
                 await session.SendAsync("Network.enable");
                 await session.SendAsync("Network.setCacheDisabled", new Dictionary<string, object>
                 {

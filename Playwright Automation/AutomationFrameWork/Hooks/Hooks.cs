@@ -13,6 +13,7 @@ namespace AutomationFrameWork.Hooks
         private readonly PlaywrightDriver _playwrightDriver;
         private readonly ScenarioContext _scenarioContext;
         private readonly FeatureContext _featureContext;
+        private static ConfigReader _configReader;
 
         private static ExtentReports _extentReports;
         private ExtentTest _extentScenario;
@@ -31,10 +32,26 @@ namespace AutomationFrameWork.Hooks
             _mailHelper = new MailHelper();
         }
 
+
         [BeforeTestRun]
         public static void BeforeTestRun()
         {
-            _extentReports = ExtentReportManager.GetExtentReport();
+            var projectRoot = CommonActionsPage.GetProjectRoot();
+            var configuration = new ConfigurationBuilder()
+                .SetBasePath(projectRoot)
+                .AddJsonFile("appsettings.json", optional: false)
+                .Build();
+
+            var configReader = configuration.GetSection("Credentials").Get<ConfigReader>();
+            var urls = configuration.GetSection("Urls").Get<UrlSettings>();
+            var automationSettings = configuration.GetSection("AutomationSettings").Get<AutomationSettings>();
+
+            configReader.AutomationSettings = automationSettings;
+
+            // ✅ Store in static field
+            _configReader = configReader;
+
+            _extentReports = ExtentReportManager.GetExtentReport("Your Application Name", _configReader.AutomationSettings);
         }
 
         [AfterTestRun]
@@ -105,25 +122,32 @@ namespace AutomationFrameWork.Hooks
                 bool testFailed = _scenarioContext.TestError != null;
                 bool isAuthFailure = testFailed && _playwrightDriver.IsOnLoginPage();
 
+                // Add scenario-level status to report
+                if (_scenarioContext.TryGetValue("ExtentScenario", out ExtentTest extentScenario))
+                {
+                    if (testFailed)
+                    {
+                        extentScenario.Fail(
+                            $"<b>Scenario Failed:</b> {_scenarioContext.TestError?.Message}");
+                    }
+                    else
+                    {
+                        extentScenario.Pass("<b>Scenario Passed</b>");
+                    }
+                }
+
+                // Session handling (your existing logic)
                 if (isAuthFailure)
                 {
-                    // The browser ended up on the login page — session is definitely broken.
-                    // Wipe it so next run does a fresh login.
                     PlaywrightDriver.InvalidateSession();
-                    Console.WriteLine("[Session] Auth failure detected (redirected to login) — session invalidated.");
                 }
                 else if (testFailed)
                 {
-                    // Test failed for a NON-auth reason (bad selector, data issue, etc.)
-                    // Session is still valid — keep it and refresh the timestamp so it doesn't expire.
                     await _playwrightDriver.SaveSessionAsync();
-                    Console.WriteLine("[Session] Test failed (non-auth reason) — session preserved and timestamp refreshed.");
                 }
                 else
                 {
-                    // Test passed — always refresh the session & timestamp so the 24hr clock resets.
                     await _playwrightDriver.SaveSessionAsync();
-                    Console.WriteLine("[Session] Test passed — session saved/refreshed.");
                 }
             }
             finally
@@ -139,35 +163,58 @@ namespace AutomationFrameWork.Hooks
             var stepType = scenarioContext.StepContext.StepInfo.StepDefinitionType;
 
             ExtentTest extentScenario;
-
             if (scenarioContext.TryGetValue("ExtentScenario", out ExtentTest storedScenario))
-            {
                 extentScenario = storedScenario;
-            }
             else
-            {
                 extentScenario = ExtentTestManager.Test;
-            }
 
-            if (extentScenario == null)
-                return;
+            if (extentScenario == null) return;
 
+            var executionStatus = scenarioContext.ScenarioExecutionStatus;
+
+            // Step passed
             if (scenarioContext.TestError == null)
             {
                 extentScenario.Pass($"{stepType} {stepText}");
+                return;
+            }
+
+            // Step was skipped because a previous step already failed
+            if (executionStatus == ScenarioExecutionStatus.TestError
+                && scenarioContext.StepContext.StepInfo.Text != GetFailedStepText(scenarioContext))
+            {
+                extentScenario.Skip($"<b>Skipped:</b> {stepType} {stepText}");
+                return;
+            }
+
+            // Step actually failed — always log Fail regardless of screenshot
+            var base64Screenshot = await CaptureScreenshotAsBase64Async();
+
+            if (!string.IsNullOrEmpty(base64Screenshot))
+            {
+                extentScenario.Fail(
+                    $"{stepType} {stepText}" +
+                    $"<br>* Reason: {scenarioContext.TestError.Message}" +
+                    $"<br>* Failure Screenshot : ",
+                    MediaEntityBuilder
+                        .CreateScreenCaptureFromBase64String(base64Screenshot)
+                        .Build());
             }
             else
             {
-                var base64Screenshot = await CaptureScreenshotAsBase64Async();
-                if (!string.IsNullOrEmpty(base64Screenshot))
-                {
-                    extentScenario.Fail($"{stepType} {stepText} " +
-                    $"<br>* Reason: {_scenarioContext.TestError.Message} " +
-                    $"<br>* Failure Screenshot : ", MediaEntityBuilder
-                            .CreateScreenCaptureFromBase64String(base64Screenshot)
-                            .Build());
-                }
+                // Always mark Fail — even without a screenshot
+                extentScenario.Fail(
+                    $"{stepType} {stepText}" +
+                    $"<br>* Reason: {scenarioContext.TestError.Message}" +
+                    $"<br>* Screenshot: Could not be captured (headless/context closed)");
             }
+        }
+
+        // Helper to track which step actually failed
+        private string GetFailedStepText(ScenarioContext scenarioContext)
+        {
+            scenarioContext.TryGetValue("FailedStepText", out string failedStep);
+            return failedStep ?? string.Empty;
         }
 
         private void LoadConfiguration()
@@ -219,7 +266,7 @@ namespace AutomationFrameWork.Hooks
 
         private static void CreateNoExecutionReport(string exception)
         {
-            var extent = ExtentReportManager.GetExtentReport();
+            var extent = ExtentReportManager.GetExtentReport("Your Application Name", _configReader.AutomationSettings);
             var test = extent.CreateTest("Test Execution Status");
 
             test.Fail(

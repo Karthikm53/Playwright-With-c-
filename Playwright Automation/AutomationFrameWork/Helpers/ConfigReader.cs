@@ -21,6 +21,10 @@ namespace AutomationFrameWork.Utilities
         public string Browser { get; set; }
         public bool Headless { get; set; }
         public float Timeout { get; set; }
+        public int SlowMo { get; set; }
+        public int targetHeight { get; set; }
+        public int targetWidth { get; set; }
+
     }
 
     public class JsonObjects

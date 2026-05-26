@@ -1,0 +1,112 @@
+# =========================
+# OS-Specific Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# IDE / Editor Files
+# =========================
+.vscode/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.usertoken
+*.swp
+
+# =========================
+# Logs & Temporary Files
+# =========================
+*.log
+*.tmp
+
+# =========================
+# Build Output Directories
+# =========================
+bin/
+obj/
+out/
+debug/
+release/
+
+# =========================
+# Test / Runtime Artifacts
+# =========================
+Reports/
+browser-session/
+coverage/
+*.coverage
+*.coverlet/
+
+# =========================
+# Dependency Directories
+# =========================
+node_modules/
+__pycache__/
+packages/
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.local
+.env.*.local
+
+# Azure Function Apps / Logic Apps
+local.settings.json
+
+# Certificates / Sensitive Files
+*.pfx
+*.key
+*.cer
+
+# =========================
+# Generated Package Files
+# =========================
+*.nupkg
+*.snupkg
+
+# =========================
+# .NET Specific
+# =========================
+project.lock.json
+project.fragment.json
+
+# =========================
+# Java Artifacts
+# =========================
+*.class
+*.jar
+*.war
+*.ear
+
+# =========================
+# Node / React
+# =========================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# jQuery / Frontend Temp
+# =========================
+tmp/
+
+# =========================
+# Telerik
+# =========================
+TelerikBackups/
+TelerikTemp/
+*.tlg
+
+# =========================
+# DevExpress
+# =========================
+DevExpressTemp/
+DevExpressLogs/
+
+# =========================
+# Aspose
+# =========================
+aspose_temp/
