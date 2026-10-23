@@ -1,5 +1,6 @@
 ﻿using System.Globalization;
 using AutomationFrameWork.Drivers;
+using static Microsoft.Playwright.Assertions;
 using Microsoft.Playwright;
 
 namespace AutomationFrameWork.Pages
@@ -8,6 +9,9 @@ namespace AutomationFrameWork.Pages
     {
         private readonly IPage _page;
         public string ProjectRoot;
+        private const float ShortWait = 1;
+        private const float MediumWait = 2;
+        private const float LongWait = 3;
 
         public CommonActionsPage(IPage page)
         {
@@ -41,6 +45,27 @@ namespace AutomationFrameWork.Pages
             }
         }
 
+        public async Task WaitAsync(string waitType)
+        {
+            switch (waitType.ToLower())
+            {
+                case "short":
+                    await _page.WaitForTimeoutAsync(ShortWait * 1000);
+                    break;
+                case "medium":
+                    await _page.WaitForTimeoutAsync(MediumWait * 1000);
+                    break;
+                case "long":
+                    await _page.WaitForTimeoutAsync(LongWait * 1000);
+                    break;
+                default:
+                    {
+                        Assert.Fail($"Invalid wait type: {waitType}. Use 'short', 'medium', or 'long'.");
+                        break;
+                    }
+            }
+        }
+
         public void LogCurrentPageUrl()
         {
             var currentUrl = _page.Url;
@@ -57,7 +82,7 @@ namespace AutomationFrameWork.Pages
             }
 
             if (directory == null)
-                throw new DirectoryNotFoundException("Could not find project root (.csproj)");
+                Assert.Fail("Could not find project root (.csproj)");
 
             return directory.FullName;
         }
@@ -72,7 +97,7 @@ namespace AutomationFrameWork.Pages
             }
 
             if (directory == null)
-                throw new DirectoryNotFoundException("Could not find project root (.csproj)");
+                Assert.Fail("Could not find project root (.csproj)");
 
             return directory.FullName;
         }
@@ -133,51 +158,45 @@ namespace AutomationFrameWork.Pages
             }
         }
 
-        public async Task VerifyFileDownloadFunctionality(string fileName, string fileType, ILocator downloadLinkLocator)
+        public async Task VerifyLetterDownloadFunctionality(string Id)
         {
+            // Use GetProjectRoot() to set download folder at project root
             var downloadDirectory = Path.Combine(GetProjectRootPath(), "FileDownloads");
             Directory.CreateDirectory(downloadDirectory);
 
-            // ✅ Sets up the listener BEFORE the click, atomically
-            var download = await _page.RunAndWaitForDownloadAsync(async () =>
-            {
-                await downloadLinkLocator.ClickAsync();
-            }, new PageRunAndWaitForDownloadOptions
-            {
-                Timeout = 60000 // optional: increase if file is large or server is slow
-            });
-
+            var downloadTask = _page.WaitForDownloadAsync();
+            var download = await downloadTask;
             var downloadedFilePath = Path.Combine(downloadDirectory, download.SuggestedFilename);
             await download.SaveAsAsync(downloadedFilePath);
-
             try
             {
                 if (!File.Exists(downloadedFilePath))
-                    throw new Exception($"Download failed: File not found at '{downloadedFilePath}'.");
+                    Assert.Fail($"Download failed: File not found at '{downloadedFilePath}'.");
 
-                if (!Path.GetExtension(downloadedFilePath).Equals("." + fileType, StringComparison.OrdinalIgnoreCase))
-                    throw new Exception($"Expected a .{fileType} file but got: '{Path.GetExtension(downloadedFilePath)}'.");
+                if (!Path.GetExtension(downloadedFilePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+                    Assert.Fail($"Expected a .pdf file but got: '{Path.GetExtension(downloadedFilePath)}'.");
 
                 if (new FileInfo(downloadedFilePath).Length == 0)
-                    throw new Exception($"Downloaded {fileType} is empty or corrupt.");
+                    Assert.Fail("Downloaded PDF is empty or corrupt.");
 
-                if (!download.SuggestedFilename.Contains(fileName, StringComparison.OrdinalIgnoreCase))
-                    throw new Exception($"Downloaded file '{download.SuggestedFilename}' does not contain expected name '{fileName}'.");
+                if (!download.SuggestedFilename.Contains(Id, StringComparison.OrdinalIgnoreCase))
+                    Assert.Fail($"Downloaded file '{download.SuggestedFilename}' does not contain the expected loan ID '{Id}'.");
+                else
+                    Console.WriteLine($"Filename check passed: {download.SuggestedFilename} contains '{Id}'.");
 
-                Console.WriteLine($"✅ Filename check passed: {download.SuggestedFilename} contains '{fileName}'.");
-                Console.WriteLine($"✅ Download verified: {download.SuggestedFilename}");
+                Console.WriteLine($"Download verified: {download.SuggestedFilename}");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ Download verification failed: {ex.Message}");
-                throw;
+                throw; // Rethrow to ensure test failure is captured in reports
             }
             finally
             {
                 if (File.Exists(downloadedFilePath))
                 {
                     File.Delete(downloadedFilePath);
-                    Console.WriteLine($"🧹 Cleaned up: {downloadedFilePath}");
+                    Console.WriteLine($" Cleaned up: {downloadedFilePath}");
                 }
             }
         }
@@ -278,83 +297,48 @@ namespace AutomationFrameWork.Pages
             }
             else
             {
-                throw new Exception($"Page title is not as expected. Actual page title is : {title}");
+                Assert.Fail($"Page title is not as expected. Actual page title is : {title}");
             }
         }
 
-        public int GetRandomLoanNumber()
+        public async Task ValidateIntColumnSortingAsync(ILocator header, ILocator data, string columnName)
         {
+            await header.ClickAsync();
+            await WaitAsync("medium");
+            var ascending = await GetElementIntValuesAsync(data);
+            Assert.True(ascending.Count > 0, $"{columnName}: No valid date values found for sorting validation.");
+            Assert.True(IsAscending(ascending), $"{columnName}: Expected ascending order.");
 
-            Random random = new Random();
-            int number = 0;
+            await header.ClickAsync();
+            await WaitAsync("medium");
+            var descending = await GetElementIntValuesAsync(data);
+            Assert.True(descending.Count > 0, $"{columnName}: No valid date values found for sorting validation.");
+            Assert.True(IsDescending(descending), $"{columnName}: Expected descending order.");
 
-            number = random.Next(0000005, 999999999);
-
-            Console.WriteLine("Generated Loannumber : " + number);
-
-            return number;
+            Console.WriteLine($"{columnName} column sort validation passed.");
         }
 
-        public async Task UploadFile(ILocator button, string filePath)
+        public async Task ValidateDateColumnSortingAsync(ILocator header, ILocator data, string columnName)
         {
-            if (!File.Exists(filePath))
-                throw new FileNotFoundException($"Upload file not found: {filePath}");
+            await header.ClickAsync();
+            await WaitAsync("medium");
+            var ascending = await GetElementDateTimeValuesAsync(data);
+            Assert.True(ascending.Count > 0, $"{columnName}: No valid date values found for sorting validation.");
+            Assert.True(IsAscendingDates(ascending), $"{columnName}: Expected ascending order.");
 
-            var fileChooser = await _page.RunAndWaitForFileChooserAsync(async () =>
-            {
-                await button.ClickAsync();
-            }, new PageRunAndWaitForFileChooserOptions
-            {
-                Timeout = 10000 // optional: increase if file dialog takes time to appear
-            });
+            await header.ClickAsync();
+            await WaitAsync("medium");
+            var descending = await GetElementDateTimeValuesAsync(data);
+            Assert.True(descending.Count > 0, $"{columnName}: No valid date values found for sorting validation.");
+            Assert.True(IsDescendingDates(descending), $"{columnName}: Expected descending order.");
 
-            await fileChooser.SetFilesAsync(filePath);
-            Console.WriteLine($"✅ File uploaded: {Path.GetFileName(filePath)}");
+            Console.WriteLine($"{columnName} column sort validation passed.");
         }
 
-        public async Task EnterTextInTheField(ILocator fieldLocator, string textToEnter)
+        public  async Task ValidateColumnVisibility(ILocator element, string columnOrElementName)
         {
-            await fieldLocator.ClearAsync();
-            await fieldLocator.FillAsync(textToEnter);
-            Console.WriteLine($"Entered text '{textToEnter}' in the field.");
-        }
-
-        public async Task TypeTextInTheField(ILocator fieldLocator, string textToEnter)
-        {
-            await fieldLocator.ClearAsync();
-            await fieldLocator.TypeAsync(textToEnter, new LocatorTypeOptions
-            {
-                Delay = 150 // milliseconds between keystrokes
-            });
-            Console.WriteLine($"Entered text '{textToEnter}' in the field.");
-        }
-
-        public async Task ClickOnTheElement(ILocator elementLocator)
-        {
-            await elementLocator.ClickAsync();
-            Console.WriteLine("Clicked on the element.");
-        }
-
-        public async Task SelectOptionFromDropdown(ILocator dropdownLocator, string optionToSelect)
-        {
-            await dropdownLocator.SelectOptionAsync(new SelectOptionValue { Label = optionToSelect });
-            Console.WriteLine($"Selected '{optionToSelect}' from the dropdown.");
-        }
-
-        public async Task SelectOptionFromDropdownByIndex(ILocator dropdownLocator, int optionIndex)
-        {
-            // Playwright uses 0-based index
-            await dropdownLocator.SelectOptionAsync(new SelectOptionValue
-            {
-                Index = optionIndex
-            });
-
-            Console.WriteLine($"Selected option at index '{optionIndex}' from the dropdown.");
-        }
-
-        public async Task CloseBrowser()
-        {
-            await _page.CloseAsync();
+            await Expect(element).ToBeVisibleAsync();
+            Console.WriteLine($"{columnOrElementName} is displayed");
         }
 
 
