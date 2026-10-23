@@ -18,11 +18,11 @@ namespace AutomationFrameWork.Drivers
         private static string SessionStatePath =>
             Path.Combine(CommonActionsPage.GetProjectRoot(), "browser-session", "session-state.json");
 
-        // NEW: Metadata file tracks when the session was saved
+        // Metadata file tracks when the session was saved
         private static string SessionMetaPath =>
             Path.Combine(CommonActionsPage.GetProjectRoot(), "browser-session", "session-meta.json");
 
-        // NEW: Re-authenticate if session is older than 23 hours (buffer before 24hr server expiry)
+        // Re-authenticate if session is older than 23 hours (buffer before 24hr server expiry)
         private static readonly TimeSpan SessionMaxAge = TimeSpan.FromHours(23);
 
         public PlaywrightDriver(ScenarioContext scenarioContext)
@@ -32,82 +32,53 @@ namespace AutomationFrameWork.Drivers
 
         public async Task InitializeAsync()
         {
-            Playwright = await Microsoft.Playwright.Playwright.CreateAsync();
-
             var config = _scenarioContext.Get<ConfigReader>("ConfigReader");
 
-            // NEW: Use the combined validity check instead of just File.Exists
+            // Fail loudly instead of silently skipping browser creation
+            string? browserName = config.AutomationSettings.Browser?.Trim().ToLower();
+            if (string.IsNullOrWhiteSpace(browserName))
+                throw new InvalidOperationException("AutomationSettings.Browser is not set in appsettings.json.");
+
+            Playwright = await Microsoft.Playwright.Playwright.CreateAsync();
+
             bool sessionExists = IsSessionValid();
 
             var launchOptions = new BrowserTypeLaunchOptions
             {
                 Headless = config.AutomationSettings.Headless,
-                SlowMo = config.AutomationSettings.SlowMo,
-                //Args = new[] { "--start-maximized" }
                 Args = new[]
                 {
-                    /*
-                     * Un-comment and use the below option in case of headless mode run
-                     * as the deault resolution of the browser opened by playwright will be smaller 
-                     * but this works in BOTH headed & headless  
-                     *
-                     */
-
-                    // $"--window-size={config.AutomationSettings.targetWidth},{config.AutomationSettings.targetHeight}",  
-
-                    /* 
-                     * Un-comment and use the below option in case if you wnat to run the code in haded mode 
-                     * and want to launch the browser for default maximized resolution.
-                     */ 
-                    
-                    
-                     "--start-maximized"
-
-
+                    $"--window-size={config.AutomationSettings.targetWidth},{config.AutomationSettings.targetHeight}"
                 }
             };
 
-            string browserName = config.AutomationSettings.Browser?.ToLower();
-
-            // -------- Browser Validation & Launch --------
-            if (!string.IsNullOrWhiteSpace(browserName))
+            switch (browserName)
             {
-                switch (browserName)
-                {
-                    case "chrome":
-                        //launchOptions.Channel = "chrome";
-                        launchOptions.ExecutablePath = @"C:\Program Files\Google\Chrome\Application\chrome.exe";
-                        Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
-                        break;
-                    case "msedge":
-                        launchOptions.Channel = "msedge";
-                        Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
-                        break;
-                    case "chromium":
-                        Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
-                        break;
-
-                    case "firefox":
-                        Browser = await Playwright.Firefox.LaunchAsync(launchOptions);
-                        break;
-
-                    case "webkit":
-                        Browser = await Playwright.Webkit.LaunchAsync(launchOptions);
-                        break;
-
-                    default:
-                        throw new ArgumentException($"Unsupported browser: {config.AutomationSettings.Browser}");
-                }
-
-
+                case "chrome":
+                    // Use the installed Chrome channel instead of a hardcoded path
+                    launchOptions.Channel = "chrome";
+                    Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
+                    break;
+                case "msedge":
+                    launchOptions.Channel = "msedge";
+                    Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
+                    break;
+                case "chromium":
+                    Browser = await Playwright.Chromium.LaunchAsync(launchOptions);
+                    break;
+                case "firefox":
+                    Browser = await Playwright.Firefox.LaunchAsync(launchOptions);
+                    break;
+                case "webkit":
+                    Browser = await Playwright.Webkit.LaunchAsync(launchOptions);
+                    break;
+                default:
+                    throw new NotSupportedException($"Unsupported browser: {config.AutomationSettings.Browser}");
             }
 
             var contextOptions = new BrowserNewContextOptions
             {
                 ViewportSize = ViewportSize.NoViewport,
-
-                //Time Zone
-                TimezoneId = "Asia/Kolkata"
             };
 
             if (sessionExists)
@@ -128,23 +99,29 @@ namespace AutomationFrameWork.Drivers
                 await BrowserContext.ClearPermissionsAsync();
             }
 
-            if (!sessionExists && browserName is "chrome" or "chromium" or "msedge")
-            {
-                var tempPage = await BrowserContext.NewPageAsync();
-                var session = await BrowserContext.NewCDPSessionAsync(tempPage);
-
-                await session.SendAsync("Network.enable");
-                await session.SendAsync("Network.setCacheDisabled", new Dictionary<string, object>
-                {
-                    ["cacheDisabled"] = true
-                });
-                await tempPage.CloseAsync();
-                Console.WriteLine("[Session] Cache disabled for fresh login run.");
-            }
-
             BrowserContext.SetDefaultTimeout(config.AutomationSettings.Timeout);
 
             Page = await BrowserContext.NewPageAsync();
+
+            // Disable cache on the actual test page (it previously targeted a temp page that was closed)
+            if (!sessionExists && browserName is "chrome" or "chromium" or "msedge")
+            {
+                var cdpSession = await BrowserContext.NewCDPSessionAsync(Page);
+                await cdpSession.SendAsync("Network.enable");
+                await cdpSession.SendAsync("Network.setCacheDisabled", new Dictionary<string, object>
+                {
+                    ["cacheDisabled"] = true
+                });
+                Console.WriteLine("[Session] Cache disabled for fresh login run.");
+            }
+
+            Console.WriteLine("-----------------------------------------------------------------------------------------------------------------------");
+
+            var width = await Page.EvaluateAsync<int>("window.innerWidth");
+            var height = await Page.EvaluateAsync<int>("window.innerHeight");
+            Console.WriteLine($"[Browser] Launched with actual size: {width}x{height}");
+
+            Console.WriteLine("-----------------------------------------------------------------------------------------------------------------------");
         }
 
         public async Task SaveSessionAsync()
@@ -163,40 +140,36 @@ namespace AutomationFrameWork.Drivers
                 Path = SessionStatePath
             });
 
-            if (File.Exists(SessionStatePath))
-            {
-                var fileInfo = new FileInfo(SessionStatePath);
-                Console.WriteLine($"[Session] Saved successfully. Size: {fileInfo.Length} bytes");
-
-                if (fileInfo.Length < 100)
-                {
-                    Console.WriteLine("[Session] WARNING: Session file is very small — cookies may not have been captured!");
-                }
-                else
-                {
-                    // NEW: Write metadata with current timestamp only if session file looks valid
-                    var meta = new { SavedAt = DateTime.UtcNow };
-                    File.WriteAllText(SessionMetaPath, JsonSerializer.Serialize(meta));
-                    Console.WriteLine($"[Session] Metadata saved. Session will expire after {SessionMaxAge.TotalHours} hours.");
-                }
-            }
-            else
+            if (!File.Exists(SessionStatePath))
             {
                 Console.WriteLine("[Session] ERROR: File was not written to disk!");
+                return;
             }
+
+            var fileInfo = new FileInfo(SessionStatePath);
+            Console.WriteLine($"[Session] Saved successfully. Size: {fileInfo.Length} bytes");
+
+            if (fileInfo.Length < 100)
+            {
+                Console.WriteLine("[Session] WARNING: Session file is very small — cookies may not have been captured!");
+                return;
+            }
+
+            // Write metadata with current timestamp only if session file looks valid
+            var meta = new { SavedAt = DateTime.UtcNow };
+            File.WriteAllText(SessionMetaPath, JsonSerializer.Serialize(meta));
+            Console.WriteLine($"[Session] Metadata saved. Session will expire after {SessionMaxAge.TotalHours} hours.");
         }
 
-        // NEW: Central validity check — replaces scattered File.Exists calls
+        // Central validity check
         public static bool IsSessionValid()
         {
-            // 1. Both files must exist
             if (!File.Exists(SessionStatePath) || !File.Exists(SessionMetaPath))
             {
                 Console.WriteLine("[Session] Session or metadata file missing.");
                 return false;
             }
 
-            // 2. Check session file size (corrupt/empty guard)
             var fileInfo = new FileInfo(SessionStatePath);
             if (fileInfo.Length < 100)
             {
@@ -205,12 +178,11 @@ namespace AutomationFrameWork.Drivers
                 return false;
             }
 
-            // 3. Check session age via metadata
             try
             {
                 var metaJson = File.ReadAllText(SessionMetaPath);
                 var meta = JsonSerializer.Deserialize<JsonElement>(metaJson);
-                var savedAt = meta.GetProperty("SavedAt").GetDateTime();
+                var savedAt = meta.GetProperty("SavedAt").GetDateTime().ToUniversalTime();
                 var age = DateTime.UtcNow - savedAt;
 
                 if (age > SessionMaxAge)
@@ -220,7 +192,7 @@ namespace AutomationFrameWork.Drivers
                     return false;
                 }
 
-                Console.WriteLine($"[Session] Session is valid — age: {age.TotalMinutes:F0} mins remaining: {(SessionMaxAge - age).TotalMinutes:F0} mins.");
+                Console.WriteLine($"[Session] Session is valid — age: {age.TotalMinutes:F0} mins, remaining: {(SessionMaxAge - age).TotalMinutes:F0} mins.");
                 return true;
             }
             catch (Exception ex)
@@ -234,12 +206,13 @@ namespace AutomationFrameWork.Drivers
         public static void InvalidateSession()
         {
             bool deleted = false;
+
             if (File.Exists(SessionStatePath))
             {
                 File.Delete(SessionStatePath);
                 deleted = true;
             }
-            // NEW: Also clean up metadata
+
             if (File.Exists(SessionMetaPath))
             {
                 File.Delete(SessionMetaPath);
@@ -250,11 +223,10 @@ namespace AutomationFrameWork.Drivers
                 Console.WriteLine("[Session] Session invalidated. Next run will re-authenticate.");
         }
 
-        // Kept for backward compat but now delegates to IsSessionValid()
+        // Kept for backward compat, delegates to IsSessionValid()
         public static bool HasSavedSession() => IsSessionValid();
 
-        // NEW: Checks if the current page has been redirected to the login page
-        // Used in AfterScenario to detect auth failures vs regular test failures
+        // Checks if the current page has been redirected to the login page
         public bool IsOnLoginPage()
         {
             try
@@ -275,6 +247,8 @@ namespace AutomationFrameWork.Drivers
         {
             try
             {
+                if (Page == null) return false;
+
                 var userElement = await Page.QuerySelectorAsync(
                     ".user-profile, .logout-button, [data-testid='user-menu']");
                 return userElement != null;
@@ -295,8 +269,7 @@ namespace AutomationFrameWork.Drivers
 
             scenarioName = scenarioName.Replace(" ", "_");
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string projectRoot = CommonActionsPage.GetProjectRoot();
-            string tracesDirectory = Path.Combine(projectRoot, "Traces");
+            string tracesDirectory = Path.Combine(CommonActionsPage.GetProjectRoot(), "Traces");
             Directory.CreateDirectory(tracesDirectory);
 
             string tracePath = Path.Combine(tracesDirectory, $"{scenarioName}_{timestamp}.zip");
@@ -312,12 +285,24 @@ namespace AutomationFrameWork.Drivers
             }
         }
 
+        // Each close is isolated so a crashed page/browser doesn't skip the remaining cleanup
         public async Task CleanupAsync()
         {
-            if (Page != null) await Page.CloseAsync();
-            if (BrowserContext != null) await BrowserContext.CloseAsync();
-            if (Browser != null) await Browser.CloseAsync();
+            try { if (Page != null) await Page.CloseAsync(); }
+            catch (Exception ex) { Console.WriteLine($"[Cleanup] Page close failed: {ex.Message}"); }
+
+            try { if (BrowserContext != null) await BrowserContext.CloseAsync(); }
+            catch (Exception ex) { Console.WriteLine($"[Cleanup] Context close failed: {ex.Message}"); }
+
+            try { if (Browser != null) await Browser.CloseAsync(); }
+            catch (Exception ex) { Console.WriteLine($"[Cleanup] Browser close failed: {ex.Message}"); }
+
             Playwright?.Dispose();
+
+            Page = null;
+            BrowserContext = null;
+            Browser = null;
+            Playwright = null;
         }
     }
 }
