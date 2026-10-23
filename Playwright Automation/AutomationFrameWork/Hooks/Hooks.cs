@@ -21,8 +21,11 @@ namespace AutomationFrameWork.Hooks
         private readonly MailHelper _mailHelper;
 
         private static int _executedScenarioCount = 0;
-        private static String? _testRunException;
 
+        // Tracks scenarios whose setup completed, so one failed setup
+        private static int _successfulSetupCount = 0;
+
+        private static string? _testRunException;
 
         public Hooks(PlaywrightDriver playwrightDriver, ScenarioContext scenarioContext, FeatureContext featureContext)
         {
@@ -31,7 +34,6 @@ namespace AutomationFrameWork.Hooks
             _featureContext = featureContext;
             _mailHelper = new MailHelper();
         }
-
 
         [BeforeTestRun]
         public static void BeforeTestRun()
@@ -43,27 +45,27 @@ namespace AutomationFrameWork.Hooks
                 .Build();
 
             var configReader = configuration.GetSection("Credentials").Get<ConfigReader>();
-            var urls = configuration.GetSection("Urls").Get<UrlSettings>();
             var automationSettings = configuration.GetSection("AutomationSettings").Get<AutomationSettings>();
 
             configReader.AutomationSettings = automationSettings;
 
-            // ✅ Store in static field
             _configReader = configReader;
 
-            _extentReports = ExtentReportManager.GetExtentReport("Your Application Name", _configReader.AutomationSettings);
+            _extentReports = ExtentReportManager.GetExtentReport("Document Generation", _configReader.AutomationSettings);
         }
 
         [AfterTestRun]
         public static void AfterTestRun()
         {
-            if (_testRunException != null)
+            // Only write the "no execution" report when no scenario got past setup.
+            // Otherwise flush the normal report (failed setups are already marked Fail in it).
+            if (_successfulSetupCount == 0 && _testRunException != null)
             {
                 CreateNoExecutionReport(_testRunException);
             }
             else
             {
-                _extentReports.Flush();
+                _extentReports?.Flush();
                 //_mailHelper.SendEmailReport();
             }
         }
@@ -75,7 +77,8 @@ namespace AutomationFrameWork.Hooks
             featureContext.Set(feature, "ExtentFeature");
         }
 
-        [BeforeScenario]
+        // Order = 0 guarantees the browser is created before any other BeforeScenario hook runs
+        [BeforeScenario(Order = 0)]
         public async Task BeforeScenarioAsync()
         {
             ExtentTest? extentFeature = null;
@@ -93,6 +96,8 @@ namespace AutomationFrameWork.Hooks
                 _scenarioContext["ExtentScenario"] = _extentScenario;
 
                 await _playwrightDriver.InitializeAsync();
+
+                Interlocked.Increment(ref _successfulSetupCount);
             }
             catch (Exception ex)
             {
@@ -119,16 +124,20 @@ namespace AutomationFrameWork.Hooks
         {
             try
             {
-                bool testFailed = _scenarioContext.TestError != null;
+                // Use the execution status, not just TestError. Undefined, pending and
+                // binding-error steps leave TestError null and were being reported as Passed.
+                var status = _scenarioContext.ScenarioExecutionStatus;
+                bool testFailed = status != ScenarioExecutionStatus.OK;
                 bool isAuthFailure = testFailed && _playwrightDriver.IsOnLoginPage();
 
-                // Add scenario-level status to report
                 if (_scenarioContext.TryGetValue("ExtentScenario", out ExtentTest extentScenario))
                 {
                     if (testFailed)
                     {
-                        extentScenario.Fail(
-                            $"<b>Scenario Failed:</b> {_scenarioContext.TestError?.Message}");
+                        var reason = _scenarioContext.TestError?.Message
+                                     ?? $"Scenario ended with status: {status}";
+
+                        extentScenario.Fail($"<b>Scenario Failed:</b> {reason}");
                     }
                     else
                     {
@@ -136,14 +145,10 @@ namespace AutomationFrameWork.Hooks
                     }
                 }
 
-                // Session handling (your existing logic)
+                // Collapsed duplicate branches — save session unless it was an auth failure
                 if (isAuthFailure)
                 {
                     PlaywrightDriver.InvalidateSession();
-                }
-                else if (testFailed)
-                {
-                    await _playwrightDriver.SaveSessionAsync();
                 }
                 else
                 {
@@ -162,59 +167,50 @@ namespace AutomationFrameWork.Hooks
             var stepText = scenarioContext.StepContext.StepInfo.Text;
             var stepType = scenarioContext.StepContext.StepInfo.StepDefinitionType;
 
-            ExtentTest extentScenario;
-            if (scenarioContext.TryGetValue("ExtentScenario", out ExtentTest storedScenario))
-                extentScenario = storedScenario;
-            else
-                extentScenario = ExtentTestManager.Test;
+            var extentScenario = scenarioContext.TryGetValue("ExtentScenario", out ExtentTest storedScenario)
+                ? storedScenario
+                : ExtentTestManager.Test;
 
             if (extentScenario == null) return;
 
-            var executionStatus = scenarioContext.ScenarioExecutionStatus;
+            var status = scenarioContext.ScenarioExecutionStatus;
 
-            // Step passed
-            if (scenarioContext.TestError == null)
+            // Step passed only when the execution status is OK
+            if (status == ScenarioExecutionStatus.OK)
             {
                 extentScenario.Pass($"{stepType} {stepText}");
                 return;
             }
 
-            // Step was skipped because a previous step already failed
-            if (executionStatus == ScenarioExecutionStatus.TestError
-                && scenarioContext.StepContext.StepInfo.Text != GetFailedStepText(scenarioContext))
+            // Pending / undefined / binding-error steps have no TestError
+            // but are not passes — log them as Fail instead of Pass
+            if (scenarioContext.TestError == null)
             {
-                extentScenario.Skip($"<b>Skipped:</b> {stepType} {stepText}");
+                extentScenario.Fail(
+                    $"{stepType} {stepText}" +
+                    $"<br>* Reason: Step did not pass (status: {status})");
                 return;
             }
 
-            // Step actually failed — always log Fail regardless of screenshot
+            // Removed the "Skipped" branch. AfterStep does not run for skipped steps,
+            // and that branch was wrongly logging the actual failed step as Skipped.
             var base64Screenshot = await CaptureScreenshotAsBase64Async();
+            var failMessage = $"{stepType} {stepText}" +
+                              $"<br>* Reason: {scenarioContext.TestError.Message}";
 
             if (!string.IsNullOrEmpty(base64Screenshot))
             {
                 extentScenario.Fail(
-                    $"{stepType} {stepText}" +
-                    $"<br>* Reason: {scenarioContext.TestError.Message}" +
-                    $"<br>* Failure Screenshot : ",
+                    failMessage + "<br>* Failure Screenshot : ",
                     MediaEntityBuilder
                         .CreateScreenCaptureFromBase64String(base64Screenshot)
                         .Build());
             }
             else
             {
-                // Always mark Fail — even without a screenshot
                 extentScenario.Fail(
-                    $"{stepType} {stepText}" +
-                    $"<br>* Reason: {scenarioContext.TestError.Message}" +
-                    $"<br>* Screenshot: Could not be captured (headless/context closed)");
+                    failMessage + "<br>* Screenshot: Could not be captured (headless/context closed)");
             }
-        }
-
-        // Helper to track which step actually failed
-        private string GetFailedStepText(ScenarioContext scenarioContext)
-        {
-            scenarioContext.TryGetValue("FailedStepText", out string failedStep);
-            return failedStep ?? string.Empty;
         }
 
         private void LoadConfiguration()
@@ -241,15 +237,15 @@ namespace AutomationFrameWork.Hooks
         private static string DecodeBase64(string base64Text)
         {
             var bytes = Convert.FromBase64String(base64Text);
-            var decodedValue = Encoding.UTF8.GetString(bytes);
-
-            return decodedValue;
+            return Encoding.UTF8.GetString(bytes);
         }
 
         private async Task<string?> CaptureScreenshotAsBase64Async()
         {
             try
             {
+                if (_playwrightDriver.Page == null) return null;
+
                 var screenshotBytes = await _playwrightDriver.Page.ScreenshotAsync(new()
                 {
                     FullPage = true
@@ -266,7 +262,7 @@ namespace AutomationFrameWork.Hooks
 
         private static void CreateNoExecutionReport(string exception)
         {
-            var extent = ExtentReportManager.GetExtentReport("Your Application Name", _configReader.AutomationSettings);
+            var extent = ExtentReportManager.GetExtentReport("Document Generation", _configReader.AutomationSettings);
             var test = extent.CreateTest("Test Execution Status");
 
             test.Fail(
